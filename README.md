@@ -6,6 +6,8 @@ The sections below follow the milestones it was built in (M0–M6).
 Protocol logic is ported from [eufy-security-client](https://github.com/bropat/eufy-security-client)
 (MIT, © bropat and contributors; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).
 
+EufyNet itself is MIT-licensed too; see [LICENSE](LICENSE).
+
 ## Layout
 
 | Project | What |
