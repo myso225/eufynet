@@ -47,6 +47,8 @@ public class EufyImageTests
         Assert.Equal([0xFF, 0xD8], rebuilt[..2]);
         Assert.Equal((320, 180), (rebuilt[165] << 8 | rebuilt[166], rebuilt[163] << 8 | rebuilt[164]));
         Assert.Equal(0x22, rebuilt[169]);
+        // Quality-50 (unscaled Annex K) quantization tables, as HB2 encodes: luma DC 16, chroma DC 17.
+        Assert.Equal((16, 17), (rebuilt[25], rebuilt[94]));
         Assert.Equal(jpeg[scan..], rebuilt[^(jpeg.Length - scan)..]);
     }
 
