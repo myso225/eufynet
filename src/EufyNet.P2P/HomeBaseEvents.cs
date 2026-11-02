@@ -101,6 +101,13 @@ public sealed record RecordingSavedEvent(string StationSn, DateTimeOffset Time, 
     string? CropPath = null)
     : StationEvent(StationSn, Time);
 
+/// <summary>
+/// A camera's newest crop picture changed after its <see cref="RecordingSavedEvent"/> (<see cref="LocalMotionDetector"/>): the station
+/// writes it later sometimes (seen with the camera siren on).
+/// </summary>
+public sealed record PictureSavedEvent(string StationSn, DateTimeOffset Time, string DeviceSn, int Channel, DateTimeOffset CropTime, string CropPath)
+    : StationEvent(StationSn, Time);
+
 /// <summary>A camera's preview picture downloaded from the station (<see cref="HomeBaseClient.DownloadImageAsync"/>).</summary>
 public sealed record CameraImageEvent(string StationSn, DateTimeOffset Time, string DeviceSn, int Channel, DateTimeOffset? TakenAt, string File, byte[] Jpeg)
     : StationEvent(StationSn, Time);

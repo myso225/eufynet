@@ -10,6 +10,7 @@ internal static class EventText
         DetectionEvent d => $"{d.Kind.ToString().ToLowerInvariant()} detected{(d.PersonName is { } person ? $" ({person})" : "")}"
             + $"{(d.EventTime is { } at ? $" at {at:HH:mm:ss}" : "")} [{d.Source}{(d.EventType >= 0 ? $", event_type {d.EventType}" : "")}]",
         RecordingSavedEvent r => $"recording saved (#{r.EventCount}){(r.CropTime is { } at ? $", crop at {at:HH:mm:ss}" : "")}",
+        PictureSavedEvent p => $"crop at {p.CropTime:HH:mm:ss} saved after the recording",
         CameraImageEvent i => $"picture {i.File} ({i.Jpeg.Length / 1024} KB{(i.TakenAt is { } at ? $", taken {at:yyyy-MM-dd HH:mm:ss}" : "")})",
         CameraSirenEvent s => s.On ? $"siren on for {s.Seconds}s ({s.Reason})" : "siren off",
         LightSwitchEvent l => $"light/IR {(l.On ? "on" : "off")}",

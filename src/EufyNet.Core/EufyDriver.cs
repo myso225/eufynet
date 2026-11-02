@@ -551,6 +551,7 @@ public sealed class EufyDriver : IEufyDriver
             {
                 DetectionEvent d => d.DeviceSn,
                 RecordingSavedEvent r => r.DeviceSn,
+                PictureSavedEvent p => p.DeviceSn,
                 CameraImageEvent i => i.DeviceSn,
                 _ => ChannelOf(e) is { } channel ? _cameras.GetValueOrDefault(channel) : null,
             };
@@ -570,6 +571,9 @@ public sealed class EufyDriver : IEufyDriver
                     PublishState();
                     if (r.CropPath is { } path && _driver._options.DownloadPictures && Client is { } client)
                         _ = DownloadImageAsync(client, deviceSn, path, CancellationToken.None);
+                    break;
+                case PictureSavedEvent p when _driver._options.DownloadPictures && Client is { } current:
+                    _ = DownloadImageAsync(current, deviceSn, p.CropPath, CancellationToken.None);
                     break;
             }
         }

@@ -198,7 +198,7 @@ Choosing a mode in Home Assistant, Node-RED or the console **really arms or disa
 | `eufynet/<camera>/state` | yes | `last_motion`, `last_recording`, `motions`, `recordings`, `battery`, `picture_taken` |
 | `eufynet/<camera>/image` | yes | the last picture, JPEG bytes |
 | `eufynet/<camera>/motion` | no | `ON` per motion |
-| `eufynet/<camera>/event`, `eufynet/<station>/event` | no | `{"type": …, "device", "name", "time", …}`; types `motion`, `recording`, `picture`, `siren`, `alarm`, `alarm_mode`, `guard_mode`, `light`, `storage` … |
+| `eufynet/<camera>/event`, `eufynet/<station>/event` | no | `{"type": …, "device", "name", "time", …}`; types `motion`, `recording`, `picture_saved`, `picture`, `siren`, `alarm`, `alarm_mode`, `guard_mode`, `light`, `storage` … |
 | `eufynet/<station>/guard_mode/set` | in | a label (`Night`) or mode name (`Custom1`) |
 | `eufynet/command` | in | `{"id":"1","name":"picture","args":{"camera":"Front Door"}}`; names as in the console: `status`, `picture`, `set_guard_mode` (arg `mode`), `info`, `clips`, `verify_code` (arg `code`) |
 | `eufynet/result` | no | `{"id","name","success","message","data"}` for each command |

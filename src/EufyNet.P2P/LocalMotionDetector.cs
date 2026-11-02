@@ -65,6 +65,8 @@ public sealed record LatestRecordInfo(string DeviceSn, int EventCount, string? C
 /// <item>the light/IR switch message on a camera's channel is the motion → <see cref="DetectionEvent"/> right away;</item>
 /// <item>the station's recording count for that camera (CMD_DATABASE_QUERY_LATEST_INFO, read-only) going up afterwards
 /// → <see cref="RecordingSavedEvent"/>. Saving lags the motion by seconds, so the two are not matched one to one.</item>
+/// <item>a new crop picture path for a camera → on that <see cref="RecordingSavedEvent"/>, or <see cref="PictureSavedEvent"/>
+/// when the station writes it later (seen with the camera siren on); after a recording without one, it is awaited a while.</item>
 /// </list>
 /// </summary>
 public sealed class LocalMotionDetector : IAsyncDisposable
@@ -77,6 +79,10 @@ public sealed class LocalMotionDetector : IAsyncDisposable
     private readonly ConcurrentDictionary<int, DateTimeOffset> _lastMotion = new();
     /// <summary>Cameras whose recording is awaited → until when.</summary>
     private readonly ConcurrentDictionary<string, DateTimeOffset> _awaiting = new();
+    /// <summary>Cameras whose recording came without a new crop picture → until when it is awaited.</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _awaitingPicture = new();
+    /// <summary>Newest crop path seen per camera.</summary>
+    private readonly Dictionary<string, string?> _crops = [];
     private readonly CancellationTokenSource _stop = new();
     private Dictionary<string, int> _counts = [];
     private Task? _loop;
@@ -92,17 +98,19 @@ public sealed class LocalMotionDetector : IAsyncDisposable
         _client.Event += OnStationEvent;
     }
 
-    /// <summary><see cref="DetectionEvent"/> and <see cref="RecordingSavedEvent"/>.</summary>
+    /// <summary><see cref="DetectionEvent"/>, <see cref="RecordingSavedEvent"/> and <see cref="PictureSavedEvent"/>.</summary>
     public event Action<StationEvent>? Event;
 
-    /// <summary>Reads the current counts as the baseline, then watches.</summary>
     /// <summary>The station's answer at <see cref="StartAsync"/> (counts and newest crop picture per camera).</summary>
     public IReadOnlyList<LatestRecordInfo> Baseline { get; private set; } = [];
 
+    /// <summary>Reads the current counts as the baseline, then watches.</summary>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         Baseline = await QueryAsync(cancellationToken);
         _counts = Baseline.ToDictionary(r => r.DeviceSn, r => r.EventCount);
+        foreach (var record in Baseline)
+            _crops[record.DeviceSn] = record.CropPath;
         _logger.LogInformation("{Station} recording counts: {Counts}", _client.StationSn, string.Join(", ", _counts.Select(c => $"{c.Key}={c.Value}")));
         _loop = Task.Run(() => LoopAsync(_stop.Token));
     }
@@ -149,7 +157,7 @@ public sealed class LocalMotionDetector : IAsyncDisposable
         while (!ct.IsCancellationRequested)
         {
             // Read the counts every CheckInterval while recordings are awaited, otherwise on a wake or poll.
-            await WaitAsync(_awaiting.IsEmpty ? _options.PollInterval : _options.CheckInterval, ct);
+            await WaitAsync(_awaiting.IsEmpty && _awaitingPicture.IsEmpty ? _options.PollInterval : _options.CheckInterval, ct);
             await CheckAsync(ct);
 
             var now = DateTimeOffset.Now;
@@ -158,6 +166,12 @@ public sealed class LocalMotionDetector : IAsyncDisposable
                 // Normal: the camera does not record every PIR trigger (it filters short ones, e.g. walking by quickly).
                 if (until < now && _awaiting.TryRemove(KeyValuePair.Create(deviceSn, until)))
                     _logger.LogDebug("{Station}: no new recording from {Device} within {Timeout}", _client.StationSn, deviceSn, _options.RecordingTimeout);
+            }
+            foreach (var (deviceSn, until) in _awaitingPicture)
+            {
+                if (until < now && _awaitingPicture.TryRemove(KeyValuePair.Create(deviceSn, until)))
+                    _logger.LogInformation("{Station}: no new crop picture from {Device} within {Timeout} of its recording", _client.StationSn, deviceSn,
+                        _options.RecordingTimeout);
             }
         }
     }
@@ -179,7 +193,7 @@ public sealed class LocalMotionDetector : IAsyncDisposable
         }
     }
 
-    /// <summary>Raises <see cref="RecordingSavedEvent"/> for each camera whose count went up.</summary>
+    /// <summary>Raises <see cref="RecordingSavedEvent"/> for each camera whose count went up, <see cref="PictureSavedEvent"/> for a later crop.</summary>
     private async Task CheckAsync(CancellationToken ct)
     {
         IReadOnlyList<LatestRecordInfo> records;
@@ -196,18 +210,35 @@ public sealed class LocalMotionDetector : IAsyncDisposable
         var now = DateTimeOffset.Now;
         foreach (var record in records)
         {
+            // The station has its own entry (alarm records?); only cameras record clips.
+            if (record.DeviceSn == _client.StationSn)
+                continue;
             var known = _counts.TryGetValue(record.DeviceSn, out var previous);
             _counts[record.DeviceSn] = record.EventCount;
-            // The station has its own entry (alarm records?); only cameras record clips.
-            if (!known || record.EventCount <= previous || record.DeviceSn == _client.StationSn)
-                continue;
+            var recorded = known && record.EventCount > previous;
 
-            _awaiting.TryRemove(record.DeviceSn, out _);
+            // A crop is new when its path changed and it is recent (not an old one the station only now reports).
+            var newCrop = _crops.TryGetValue(record.DeviceSn, out var lastCrop) && record.CropPath != lastCrop;
+            _crops[record.DeviceSn] = record.CropPath;
             var crop = record.ParseCropName();
+            var picture = newCrop && crop is { } c && now - c.Time <= _options.CropMaxAge ? crop : null;
             var channel = _cameras.FirstOrDefault(c => c.Value == record.DeviceSn) is { Value: not null } camera ? camera.Key : crop?.Channel ?? -1;
-            var fresh = crop is { } c && now - c.Time <= _options.CropMaxAge;
-            Event?.Invoke(new RecordingSavedEvent(_client.StationSn, now, record.DeviceSn, channel, record.EventCount,
-                fresh ? crop!.Value.Time : null, fresh ? record.CropPath : null));
+
+            if (recorded)
+            {
+                _awaiting.TryRemove(record.DeviceSn, out _);
+                if (picture is null)
+                    _awaitingPicture[record.DeviceSn] = now + _options.RecordingTimeout;
+                else
+                    _awaitingPicture.TryRemove(record.DeviceSn, out _);
+                Event?.Invoke(new RecordingSavedEvent(_client.StationSn, now, record.DeviceSn, channel, record.EventCount,
+                    picture?.Time, picture is null ? null : record.CropPath));
+            }
+            else if (picture is { } late)
+            {
+                _awaitingPicture.TryRemove(record.DeviceSn, out _);
+                Event?.Invoke(new PictureSavedEvent(_client.StationSn, now, record.DeviceSn, channel, late.Time, record.CropPath!));
+            }
         }
     }
 

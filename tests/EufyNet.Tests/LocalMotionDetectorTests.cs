@@ -34,11 +34,13 @@ public class LocalMotionDetectorTests
     public async Task Recording_saved_later_is_reported_for_the_camera_whose_count_went_up()
     {
         var counts = new ConcurrentDictionary<string, int> { [Station.StationSn] = 5, [FrontDoor] = 10, [Backyard] = 3 };
-        await using var rig = await Rig.StartAsync(counts, crop: $"/media/mmcblk0p1/video/{DateTime.Now:yyyyMMddHHmmss}_c00.jpg");
+        var crops = new ConcurrentDictionary<string, string>();
+        await using var rig = await Rig.StartAsync(counts, crops);
 
         await rig.LightSignalAsync(channel: 1);
         Assert.IsType<DetectionEvent>(await rig.NextAsync());
         // The clip saved next is Front Door's (an earlier motion), not Backyard's; the station's own entry is no camera.
+        crops[FrontDoor] = CropNow(0);
         counts[FrontDoor] = 11;
         counts[Station.StationSn] = 6;
 
@@ -47,16 +49,52 @@ public class LocalMotionDetectorTests
         Assert.Equal(0, saved.Channel);
         Assert.Equal(11, saved.EventCount);
         Assert.NotNull(saved.CropTime);
+        Assert.Equal(crops[FrontDoor], saved.CropPath);
     }
+
+    [Fact]
+    public async Task Crop_saved_after_the_recording_is_reported_as_a_picture()
+    {
+        var counts = new ConcurrentDictionary<string, int> { [FrontDoor] = 10, [Backyard] = 3 };
+        var crops = new ConcurrentDictionary<string, string> { [Backyard] = "/media/mmcblk0p1/video/20261101201500_c01.jpg" };
+        await using var rig = await Rig.StartAsync(counts, crops);
+
+        await rig.LightSignalAsync(channel: 1);
+        Assert.IsType<DetectionEvent>(await rig.NextAsync());
+        counts[Backyard] = 4;
+        var saved = Assert.IsType<RecordingSavedEvent>(await rig.NextAsync());
+        Assert.Null(saved.CropPath);
+
+        crops[Backyard] = CropNow(1);
+        var picture = Assert.IsType<PictureSavedEvent>(await rig.NextAsync());
+        Assert.Equal((Backyard, 1, crops[Backyard]), (picture.DeviceSn, picture.Channel, picture.CropPath));
+    }
+
+    [Fact]
+    public async Task Crop_already_there_at_start_is_not_reported_again()
+    {
+        var counts = new ConcurrentDictionary<string, int> { [FrontDoor] = 10 };
+        await using var rig = await Rig.StartAsync(counts, new ConcurrentDictionary<string, string> { [FrontDoor] = CropNow(0) });
+
+        await rig.LightSignalAsync(channel: 0);
+        Assert.IsType<DetectionEvent>(await rig.NextAsync());
+        counts[FrontDoor] = 11;
+
+        Assert.Null(Assert.IsType<RecordingSavedEvent>(await rig.NextAsync()).CropPath);
+    }
+
+    private static string CropNow(int channel) => $"/media/mmcblk0p1/video/{DateTime.Now:yyyyMMddHHmmss}_c{channel:00}.jpg";
 
     [Fact]
     public async Task Old_crop_time_is_not_reported()
     {
         var counts = new ConcurrentDictionary<string, int> { [FrontDoor] = 10 };
-        await using var rig = await Rig.StartAsync(counts, crop: "/media/mmcblk0p1/video/20261101051551_c00.jpg");
+        var crops = new ConcurrentDictionary<string, string>();
+        await using var rig = await Rig.StartAsync(counts, crops);
 
         await rig.LightSignalAsync(channel: 0);
         Assert.IsType<DetectionEvent>(await rig.NextAsync());
+        crops[FrontDoor] = "/media/mmcblk0p1/video/20261101051551_c00.jpg";
         counts[FrontDoor] = 11;
 
         Assert.Null(Assert.IsType<RecordingSavedEvent>(await rig.NextAsync()).CropTime);
@@ -98,11 +136,11 @@ public class LocalMotionDetectorTests
 
         public ConcurrentQueue<StationEvent> Events { get; } = new();
 
-        public static async Task<Rig> StartAsync(ConcurrentDictionary<string, int> counts, string? crop = null)
+        public static async Task<Rig> StartAsync(ConcurrentDictionary<string, int> counts, ConcurrentDictionary<string, string>? crops = null)
         {
             var station = new CommandStation();
             station.Handler = (cmd, _) => cmd == CommandType.CmdSetPayload
-                ? [station.Result(cmd, 0), Control(station, CommandType.CmdDatabase, LatestInfo(counts, crop))]
+                ? [station.Result(cmd, 0), Control(station, CommandType.CmdDatabase, LatestInfo(counts, crops))]
                 : [];
             var fake = new FakeStation(Did) { OnData = station.Handle };
             var session = fake.CreateSession();
@@ -163,9 +201,13 @@ public class LocalMotionDetectorTests
             new LatestRecordInfo("T8140P0000000A01", 4027, "/media/mmcblk0p1/video/20261101115719_c00.jpg")], records);
     }
 
-    private static string LatestInfo(IDictionary<string, int> counts, string? crop) => JsonSerializer.Serialize(new
+    private static string LatestInfo(IDictionary<string, int> counts, IReadOnlyDictionary<string, string>? crops) => JsonSerializer.Serialize(new
     {
-        data = counts.Select(c => new { device_sn = c.Key, payload = new { event_count = c.Value, crop_hb3_path = crop ?? "", crop_cloud_path = "" } }),
+        data = counts.Select(c => new
+        {
+            device_sn = c.Key,
+            payload = new { event_count = c.Value, crop_hb3_path = crops?.GetValueOrDefault(c.Key) ?? "", crop_cloud_path = "" },
+        }),
         cmd = (int)CommandType.CmdDatabaseQueryLatestInfo,
         mIntRet = 0,
     });

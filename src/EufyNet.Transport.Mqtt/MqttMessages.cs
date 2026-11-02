@@ -118,6 +118,9 @@ public static class MqttMessages
                 json["event_count"] = r.EventCount;
                 json["crop_time"] = Time(r.CropTime);
                 break;
+            case PictureSavedEvent p:
+                json["crop_time"] = Time(p.CropTime);
+                break;
             case CameraImageEvent i:
                 json["file"] = i.File;
                 json["taken_at"] = Time(i.TakenAt);
@@ -148,6 +151,7 @@ public static class MqttMessages
     {
         DetectionEvent => "motion",
         RecordingSavedEvent => "recording",
+        PictureSavedEvent => "picture_saved",
         CameraImageEvent => "picture",
         CameraSirenEvent => "siren",
         AlarmModeChangedEvent => "alarm_mode",
