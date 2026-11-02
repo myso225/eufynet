@@ -1,0 +1,41 @@
+# Service to add under "services:" in your compose.yaml, next to a folder "eufynet" holding this folder's contents
+# (Dockerfile, app/) and a data/ folder. Replace the <…> values.
+  eufynet:
+    build: ./eufynet
+    image: eufynet:local
+    container_name: eufynet
+    # The P2P lookup is UDP to the HomeBase on the LAN.
+    network_mode: host
+    restart: unless-stopped
+    # Owner of ./eufynet/data on the host (id -u / id -g); the image's own user (1654) cannot write a folder you own.
+    user: "1000:1000"
+    environment:
+      # Local time for logs and for the station's crop picture times.
+      - TZ=<Region/City>
+      # Eufy account. Write a $ in a password as $$; quote the entry if it has # or spaces.
+      - Eufy__Username=<eufy email>
+      - "Eufy__Password=<eufy password>"
+      # Two-letter country of the account, as chosen in the Eufy app (default US).
+      - Eufy__Country=<country>
+      # The HomeBase's LAN IP by serial (the cloud only knows the public IP); without it the station is searched by broadcast.
+      - Eufy__StationIpAddresses__<station serial>=<station ip>
+      # MQTT broker; host networking, so 127.0.0.1 when it runs on the same machine.
+      - Mqtt__Host=127.0.0.1
+      - Mqtt__Username=<mqtt user>
+      - "Mqtt__Password=<mqtt password>"
+      # Labels for the Home Assistant guard mode select; only these modes are offered. Without them: all HomeBase 2 modes.
+      - Mqtt__GuardModes__Away=Away
+      - Mqtt__GuardModes__Home=Home
+      - Mqtt__GuardModes__Schedule=Schedule
+      - Mqtt__GuardModes__Custom1=Night
+      - Mqtt__GuardModes__Disarmed=Disarmed
+      # Optional:
+      # - Eufy__CaptureEvents=true
+      # - Logging__Console__FormatterName=json
+    volumes:
+      - ./eufynet/data:/app/data
+    # docker attach eufynet → console commands (status, mode …); detach with Ctrl+P Ctrl+Q.
+    stdin_open: true
+    tty: true
+    # SIGTERM → the app sends END to the HomeBase and exits within 10 s.
+    stop_grace_period: 15s

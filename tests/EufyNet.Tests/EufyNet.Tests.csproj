@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="MQTTnet.Server" Version="5.2.0.1603" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="TestData\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EufyNet.Cloud\EufyNet.Cloud.csproj" />
+    <ProjectReference Include="..\..\src\EufyNet.P2P\EufyNet.P2P.csproj" />
+    <ProjectReference Include="..\..\src\EufyNet.Core\EufyNet.Core.csproj" />
+    <ProjectReference Include="..\..\src\EufyNet.Transport.Console\EufyNet.Transport.Console.csproj" />
+    <ProjectReference Include="..\..\src\EufyNet.Transport.Mqtt\EufyNet.Transport.Mqtt.csproj" />
+  </ItemGroup>
+
+</Project>

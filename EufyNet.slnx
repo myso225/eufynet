@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EufyNet.App/EufyNet.App.csproj" />
+    <Project Path="src/EufyNet.Cloud/EufyNet.Cloud.csproj" />
+    <Project Path="src/EufyNet.Core/EufyNet.Core.csproj" />
+    <Project Path="src/EufyNet.P2P/EufyNet.P2P.csproj" />
+    <Project Path="src/EufyNet.Transport.Console/EufyNet.Transport.Console.csproj" />
+    <Project Path="src/EufyNet.Transport.Mqtt/EufyNet.Transport.Mqtt.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EufyNet.Tests/EufyNet.Tests.csproj" />
+  </Folder>
+</Solution>
