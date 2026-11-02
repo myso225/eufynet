@@ -1,182 +1,268 @@
 # EufyNet
 
-.NET 10 replacement for the parts of `eufy-security-ws` that log in to the Eufy cloud and talk to the HomeBase.
-The sections below follow the milestones it was built in (M0–M6).
+EufyNet connects a **Eufy HomeBase 2** and its cameras to **Home Assistant** and **Node-RED** over MQTT, and keeps the
+Eufy cloud out of the loop as much as possible. It talks to the HomeBase directly on your LAN and runs as one small
+Docker container, for example on a Raspberry Pi next to Home Assistant.
 
-Protocol logic is ported from [eufy-security-client](https://github.com/bropat/eufy-security-client)
-(MIT, © bropat and contributors; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).
+It is a .NET 10 port of the parts of [eufy-security-client](https://github.com/bropat/eufy-security-client) /
+eufy-security-ws that log in and talk to the HomeBase, extended with motion detection that needs no cloud push.
 
-EufyNet itself is MIT-licensed too; see [LICENSE](LICENSE).
+## What you get
 
-## Layout
+In Home Assistant (found automatically through MQTT discovery, no YAML):
 
-| Project | What |
-|---|---|
-| `src/EufyNet.Cloud` | Cloud login (ECDH + AES, 2FA, captcha, trusted device), session persistence, station/device lists |
-| `src/EufyNet.P2P` | UDP session, commands, encryption, events, local motion detection |
-| `src/EufyNet.Core` | `EufyDriver` (login → stations → P2P, state, commands) and the transport contract (`IBridgeTransport`, `TransportBridge`) |
-| `src/EufyNet.Transport.Console` | Transport: events and state as log lines, commands and login answers from stdin |
-| `src/EufyNet.Transport.Mqtt` | Transport: MQTT with Home Assistant discovery, events for Node-RED, commands in |
-| `src/EufyNet.App` | Generic Host wiring |
-| `docker/` | Dockerfile, compose service and env example for the Pi 5 |
-| `tests/EufyNet.Tests` | Crypto checked against Node-generated vectors; login flow against a fake Eufy server; P2P against a fake station |
+| Device | Entities |
+| --- | --- |
+| HomeBase | **Guard mode** (select; changing it arms or disarms for real), **Active mode** (what the station applies right now, e.g. Home while Schedule is selected), **Connected** |
+| Each camera | **Motion** (on within a second of the camera's PIR trigger, off after 30 s), **Last motion**, **Last recording**, **Motions (8 h)**, **Recordings (8 h)**, **Battery**, **Last picture** (image), **Picture taken** |
 
-`nuget.config` limits restore to nuget.org, so machine-wide private feeds are not needed.
+For Node-RED and other automations, every event is also published as JSON on MQTT (motion, recording saved, new picture,
+siren, alarm, guard mode change …), and commands can be sent the same way. See [MQTT topics](#mqtt-topics).
 
-## M1 — log in and list stations
+## How it works
 
-```bash
-dotnet user-secrets set "Eufy:Username" "you@example.com" --project src/EufyNet.App
-dotnet user-secrets set "Eufy:Password" "your-password" --project src/EufyNet.App
-dotnet run --project src/EufyNet.App
+```
+             once at start / hourly                    LAN, UDP (P2P)
+ Eufy cloud ───────────────────────┐        ┌───────────────────────────── HomeBase 2 ── cameras
+  login, device list,              ▼        ▼
+  battery fallback              ┌──────────────┐   MQTT    ┌──────────────┐
+                                │   EufyNet    │──────────▶│  Mosquitto   │──▶ Home Assistant
+                                │  (Docker)    │◀──────────│              │──▶ Node-RED
+                                └──────────────┘ commands  └──────────────┘
 ```
 
-- `Country` defaults to `US` (`src/EufyNet.App/appsettings.json`). It must match the account's country, e.g. `dotnet user-secrets set "Eufy:Country" "DE" --project src/EufyNet.App`.
-- On the first run Eufy emails a code. Type it at the prompt; the app then registers itself as trusted device `eufynet`.
-- The session is saved to `data/cloud-session.json` (relative to the current directory). It holds the auth token, so keep it private. Later runs restore it without 2FA. `--force-login` ignores it.
-- `data/stations.json` and `data/devices.json` hold the raw decrypted lists (`p2p_did`, `app_conn`, `member` …). They are the input for the P2P milestones.
-- Environment variables work too: `Eufy__Username`, `Eufy__Password`, `Eufy__Country`, `Eufy__DataDir`.
+1. **Cloud, only to start.** EufyNet logs in to your Eufy account (with the emailed code the first time; afterwards it is a
+   trusted device and the session is reused) and reads the list of stations and cameras with the keys needed to reach the
+   HomeBase. The cloud is also the fallback for battery levels.
+2. **Local P2P to the HomeBase.** It opens Eufy's P2P protocol directly to the HomeBase's LAN address, keeps it alive, and
+   reconnects if it drops. Guard mode changes, pictures and status go over this connection.
+3. **Motion without the cloud.** A HomeBase 2 does not push detections over P2P (the app gets them from the cloud). It
+   does tell the bridge the moment a camera's PIR triggers, on that camera's channel. EufyNet reports that as **motion**
+   right away. It then watches the HomeBase's recording counter per camera and reports **recording saved** when the
+   clip is written. Motion is fast but includes walk-bys the camera did not find worth recording; a recording means the
+   camera's own check passed. Use whichever fits the automation.
+4. **Pictures.** After a recording, EufyNet downloads the HomeBase's preview picture of it (when the station made one)
+   and publishes it to Home Assistant.
+5. **MQTT.** Everything is published to your broker with Home Assistant discovery, and commands (guard mode, picture …)
+   come back the same way.
 
-## M2 — P2P connection to the HomeBase
+Protocol details and what was observed on real hardware: [docs/protocol-notes.md](docs/protocol-notes.md).
 
-After listing, the app keeps a P2P session open to every station until Ctrl+C (`--list-only` skips this).
+## Requirements
 
-- `Eufy:P2PConnectionSetup`: `OnlyLocal` (default, LAN only) or `Quickest` (also asks Eufy's cloud lookup servers, using the station's DSK key).
-- `Eufy:StationIpAddresses`: station LAN IPs by serial. The cloud's `ip_addr` is the public IP, so set this. Without an entry the lookup is broadcast.
-- Flow: `LOCAL_LOOKUP` → `CHECK_CAM` (port ±3) → `CAM_ID` → `PING` every 5 s. Every incoming DATA packet is ACKed. After 50 s without a `PONG` the session ends and reconnects (backoff 5 → 60 s).
-- Every 5 minutes it logs a status line. `Logging__LogLevel__EufyNet.P2P=Debug` shows each lookup step and DATA packet.
+- A **HomeBase 2** with battery cameras. Tested with firmware 3.4.2.6h and eufyCam 2 Pro; other HomeBase models may
+  work but are untested.
+- A **Raspberry Pi** (or any arm64/x64 Linux box) with **Docker** and the compose plugin, on the same LAN as the HomeBase.
+- An **MQTT broker**, e.g. the Mosquitto add-on/container you use for Home Assistant, with the MQTT integration set up
+  in Home Assistant.
+- The **.NET 10 SDK** on the machine where you build (a PC, or the Pi itself). See step 1 below.
+- Your Eufy account's email, password and country. Consider a separate Eufy account that you invite to the HomeBase as
+  an admin from the Eufy app: the bridge stays logged in, and some clients log each other out when they share one account.
 
-The code is in `src/EufyNet.P2P`: `P2PPackets` (builders/parsers, checked against Node vectors), `P2PSession` (one connection), `P2PStationConnector` (reconnect loop).
+## Deploy on a Raspberry Pi
 
-## M3 — commands: encryption and guard mode
+The steps assume your compose file is `~/DockerCompose/compose.yaml`; adjust the paths to yours.
 
-Once connected, the app sends `CMD_GATEWAYINFO` and sets up command encryption. It then reads commands from the console:
-
-| Command | What it does |
-| --- | --- |
-| `status` | guard mode, alarm mode and encryption per station |
-| `info` | `CMD_CAMERA_INFO` (read-only); prints the station's JSON |
-| `mode <away\|home\|schedule\|custom1..3\|off\|geo\|disarmed> [serial]` | **sets the guard mode** (real alarm change) |
-| `quit` | close the sessions and exit |
-
-- Encryption: the station replies with a cloud cipher id plus an RSA-wrapped session key (Level 2). For this account Eufy's `get_ciphers` returns the private key lower-cased, so it cannot be decoded. The app falls back to Level 1 (key from serial + DID), exactly like eufy-security-client. The log shows this as a warning. Encrypted commands work under Level 1, which `info` confirms.
-- Guard mode on firmware ≥ 2.0.7.9 goes through `CMD_SET_PAYLOAD` (JSON with `cmd: 1224`); older firmware uses `CMD_SET_ARMING`. The starting value comes from cloud param 1224. Alarm-mode changes the station pushes (`CMD_GET_ALARM_MODE`) are logged.
-- Code: `P2PCommands` (framing, AES/RSA, Node vectors), `P2PMessageAssembler` (ordering, reassembly), `P2PCommandChannel` (one command at a time, resend until ACK, result matching), `HomeBaseClient`.
-
-## M4 — events from the HomeBase
-
-Events the station pushes over P2P are logged as `Event: …` lines, for example `Front Door: person detected [event_type 3102]`. `HomeBaseEventParser` (in `src/EufyNet.P2P/HomeBaseEvents.cs`) turns CONTROL messages into transport-neutral `StationEvent` records:
-
-| Message | Record |
-| --- | --- |
-| `CMD_GET_ALARM_MODE` | `AlarmModeChangedEvent` |
-| `CMD_GET_DELAY_ALARM` | `AlarmArmedEvent` (event 0) / `AlarmDelayEvent` |
-| `CMD_SET_TONE_FILE` | `AlarmTriggeredEvent` |
-| `CMD_GET_TFCARD_STATUS` | `StorageStatusEvent` |
-| `CMD_NOTIFY_PAYLOAD` cmd 2037 (`CMD_CAMERA_PUSH_NOTIFY`) | `DetectionEvent` (motion / person / doorbell / pet / vehicle …) |
-| `CMD_NOTIFY_PAYLOAD` cmd 1550 / 1829 | `SensorStatusEvent` / `HubNotifyUpdateEvent` |
-| anything else | `UnknownEvent` (command, inner cmd, payload), so nothing is dropped silently |
-
-Every CONTROL and unsolicited DATA message (except pings) is also appended to `data/events.jsonl` (time, command, channel, payload as text and hex). That file is the raw material for new parsers.
-
-### Motion on a HomeBase 2 without the cloud
-
-The capture showed that HB2 (3.4.2.6h) sends no detection push over P2P. When a camera records, two messages arrive on its channel instead:
-
-- `CMD_SET_FLOODLIGHT_MANUAL_SWITCH` (`LightSwitchEvent`), even on eufyCam 2C without a spotlight;
-- `CMD_NOTIFY_PAYLOAD` cmd 55000 (`StorageInfoEvent`, eMMC free/total) once the clip is written.
-
-With the camera alarm enabled (night mode), `CMD_SET_DEVS_TONE_FILE` follows about 4 s later: siren on (`07 00 00 00` = `CameraPir`, then `0a 00 00 00` = 10 s), and an all-zero message when it stops (`CameraSirenEvent`).
-
-`LocalMotionDetector` turns this into two events:
-
-1. **Motion, right away.** The light/IR message's channel picks the camera (cloud device list, `device_channel`), and its time is the event time: `DetectionEvent` with kind `Motion` and source `LightSignal`. Repeats within 30 s (`MotionCooldown`) count as one.
-2. **Recording saved, later.** At connect the detector reads the station's recording count per camera (`CMD_DATABASE_QUERY_LATEST_INFO`, read-only). After a motion it re-reads the counts every 5 s (`CheckInterval`) for up to 90 s (`RecordingTimeout`). Any camera whose count went up gets a `RecordingSavedEvent`. Saving lags motion by several seconds, so this event names the camera whose count changed, not the last motion. The newest crop picture's time (`20261101115719_c00.jpg` = 11:57:19, channel 0) is reported only when it is recent, because the station doesn't make a crop for every clip.
-
-The two events mean different things. Motion is the raw PIR trigger: it is fast but can be wind or sun. The camera records only what passes its own check, so a quick walk-by gives motion without a recording. A long stay can give two recordings for one motion. In the walk test on 1 Nov there were 3 walks and 3 motion events. For automations, use motion where speed matters and recording saved where false alarms matter.
-
-No person/vehicle distinction yet: the record list query that would give it (`CMD_DATABASE_QUERY_LOCAL`) returns an empty list on this firmware, and `QUERY_BY_DATE` gets no answer.
-
-These timings are settings under `Eufy:LocalMotion` (`MotionCooldown`, `CheckInterval`, `RecordingTimeout`, `CropMaxAge`). `PollInterval` (e.g. `00:05:00`) also reads the counts without a motion, to catch a missed light message.
-
-`clips [camera]` prints the latest-info and record-list replies and writes them to `data/clips-latest.json` / `data/clips-local.json`.
-
-## M0 — capture golden vectors from the running Node bridge
-
-These steps run on the Pi. They give real HomeBase packets to test the P2P code against (M2/M3).
-
-1. Install tcpdump if it is missing (`sudo apt install tcpdump`) and start capturing UDP to and from the HomeBase:
-   `sudo tcpdump -i any -w ~/hb2.pcap udp and host <station ip>`
-2. In another shell, add `DEBUG=1` to the eufy-security-ws service's environment in your `compose.yaml`, then recreate it:
-   `docker compose up -d <service>`
-3. Wait about a minute until the log shows the P2P connection and `set encryption level`. Then change the guard mode once in HA, and back.
-4. Stop tcpdump (Ctrl+C) and save the log: `docker logs <container> > ~/ws-debug.log 2>&1`
-5. Copy both files to `EufyNet/data/m0/` on Windows (`scp <user>@<pi>:~/hb2.pcap <user>@<pi>:~/ws-debug.log data/m0/`).
-6. Remove `DEBUG=1` and recreate the container again.
-
-The log contains tokens and P2P keys. `data/` is git-ignored; keep it that way.
-
-## M5 — transport seam, shutdown, Docker
-
-`EufyDriver` does the work and knows no transport. It raises `LoginChanged`, `StateChanged` (per station: connected, guard/alarm mode, encryption, last motion/recording per camera) and `EventRaised` (`BridgeEvent` = station event + camera). It executes `BridgeCommand`s: `status`, `set_guard_mode`, `info`, `clips`, and the login answers `verify_code`, `resend_code` and `captcha`. `TransportBridge` connects it to an `IBridgeTransport`. MQTT (M6) is a second transport implementing that interface; each transport gets its own `TransportBridge`.
-
-Console transport: the commands are as before (`status | info [station] | clips [camera] | picture [camera] | mode <name> [station] | quit`). While the login waits, a bare line is the emailed code or the captcha answer, and an empty line asks for a new code.
-
-- **Shutdown:** Ctrl+C or SIGTERM (`docker stop`) stops the host, which closes each P2P session with `END` (logged as `Closed the P2P connection … (END)`) within 10 s.
-- **Logs:** single-line text by default. `Logging__Console__FormatterName=json` writes one JSON object per line with the fields (`Station`, `Device`, `EventType` …).
-- **Capture:** `Eufy:CaptureEvents=true` writes the raw `data/events.jsonl` (off by default since M4).
-
-### Docker on the Pi 5
+**1. Build the app** for arm64 in the repository folder (on a PC with the .NET 10 SDK):
 
 ```bash
 dotnet publish src/EufyNet.App -c Release -r linux-arm64 --self-contained false -o docker/app
 ```
 
-`docker/` then holds everything for the image: the Dockerfile only copies `app/` onto `mcr.microsoft.com/dotnet/runtime:10.0`, so it builds on the Pi or with `docker buildx build --platform linux/arm64` without emulation. Copy `docker/` to an `eufynet` folder next to your `compose.yaml` along with `data/cloud-session.json` from the PC, so the Pi needs no new 2FA login.
+No SDK on your PC? Clone the repository on the Pi and run the same command inside the SDK container (not tested yet;
+then skip step 2's `scp` and copy `docker/*` locally):
 
-Then add `compose.eufynet.yaml`'s service to the compose file and fill in the `<…>` values (Eufy login and country, the station's LAN IP, MQTT). Compose treats `$` as a variable, so write a `$` in the password as `$$`. If `compose.yaml` is backed up or committed, put the password in the `.env` next to it instead (`EUFY_PASSWORD=…`) and use `Eufy__Password=${EUFY_PASSWORD}`.
+```bash
+docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet publish src/EufyNet.App -c Release -r linux-arm64 --self-contained false -o docker/app
+```
 
-It runs on a Raspberry Pi 5 (arm64) next to Home Assistant's Mosquitto.
+`docker/` now holds everything the image needs: a `Dockerfile` that copies `app/` onto the .NET runtime image.
 
-## M6 — MQTT and Home Assistant
+**2. Copy it to the Pi**, into an `eufynet` folder next to your compose file, with an empty `data` folder:
 
-Set `Mqtt:Host` (env `Mqtt__Host`) and the bridge also connects to an MQTT broker, next to the console. Tested against an in-process MQTTnet broker; not yet against Home Assistant. Home Assistant finds the devices through MQTT discovery; no YAML is needed. The broker can be down at start or go away: the bridge reconnects every 5 s and then publishes everything again.
+```bash
+scp -r docker/* <user>@<pi>:~/DockerCompose/eufynet/
+```
 
-| Setting | Default | |
-| --- | --- | --- |
-| `Mqtt:Host`, `Port`, `Username`, `Password` | –, 1883 | broker |
-| `Mqtt:BaseTopic` | `eufynet` | prefix of all topics below |
-| `Mqtt:DiscoveryPrefix` | `homeassistant` | empty = no discovery |
-| `Mqtt:GuardModes:<mode>` | all HomeBase 2 modes | labels for the select, e.g. `Mqtt__GuardModes__Custom1=Night`; only listed modes are offered |
-| `Mqtt:MotionOffDelay` | 30 s | the motion sensor's `off_delay` |
-| `Eufy:ActivityWindow` | 8 h | span of the motion/recording counters |
-| `Eufy:BatteryInterval` | 1 h | battery refresh |
-| `Eufy:DownloadPictures` | true | crop picture after a recording and at connect |
+```bash
+ssh <user>@<pi> "mkdir -p ~/DockerCompose/eufynet/data"
+```
 
-**Home Assistant entities**
+**3. Find your HomeBase's serial and LAN IP.** The serial starts with `T8010`; it is in the Eufy app's HomeBase settings,
+and the bridge logs it at start (`Station T8010… : model T8010 …`), so you can also start without the IP line and add it
+afterwards. The LAN IP is in your router's client list; give it a fixed DHCP lease.
 
-- HomeBase: *Guard mode* (select; **changing it sets the real alarm**), *Active mode* (what the station applies, e.g. Home while Schedule is selected), *Connected*.
-- Each camera: *Motion* (on at the light/IR signal, off after 30 s), *Last motion*, *Last recording*, *Motions (8 h)*, *Recordings (8 h)*, *Battery*, *Last picture* (image entity) and *Picture taken*.
+**4. Add the service** from [docker/compose.eufynet.yaml](docker/compose.eufynet.yaml) under `services:` in your
+compose file and fill in the `<…>` values:
 
-The counters and times are kept in `data/activity.json`, so a restart does not reset them.
+```yaml
+  eufynet:
+    build: ./eufynet
+    image: eufynet:local
+    container_name: eufynet
+    network_mode: host
+    restart: unless-stopped
+    user: "1000:1000"            # your uid:gid from `id`, owner of ./eufynet/data
+    environment:
+      - TZ=<Region/City>
+      - Eufy__Username=<eufy email>
+      - "Eufy__Password=<eufy password>"
+      - Eufy__Country=<country>  # two letters, as in the Eufy app, e.g. DE
+      - Eufy__StationIpAddresses__<station serial>=<station ip>
+      - Mqtt__Host=127.0.0.1     # the broker; 127.0.0.1 when it runs on the same machine
+      - Mqtt__Username=<mqtt user>
+      - "Mqtt__Password=<mqtt password>"
+      - Mqtt__GuardModes__Away=Away
+      - Mqtt__GuardModes__Home=Home
+      - Mqtt__GuardModes__Schedule=Schedule
+      - Mqtt__GuardModes__Custom1=Night
+      - Mqtt__GuardModes__Disarmed=Disarmed
+    volumes:
+      - ./eufynet/data:/app/data
+    stdin_open: true
+    tty: true
+    stop_grace_period: 15s
+```
 
-**Topics** (all JSON unless noted)
+- In passwords write `$` as `$$`, and keep the quotes.
+- `user:` matters: the image runs without root, so the container needs your uid to write `data/`.
+- `Mqtt__GuardModes__*` sets which modes the Home Assistant select offers and their names. The names in the Eufy app
+  for custom modes are not available to the bridge, so label them yourself (see [Guard modes](#guard-modes)).
+- Prefer to keep passwords out of `compose.yaml`? Put `EUFY_PASSWORD=…` in the `.env` file next to it and write
+  `- Eufy__Password=${EUFY_PASSWORD}`.
+
+**5. Start it** and watch the log:
+
+```bash
+cd ~/DockerCompose && docker compose up -d --build eufynet && docker logs -f eufynet
+```
+
+Ctrl+C leaves the log; the container keeps running.
+
+**6. First login.** On the very first start Eufy emails you a verification code and the log says so. Enter it in the
+container's console:
+
+```bash
+docker attach eufynet
+```
+
+Type the code and press Enter (an empty line asks for a new code). Leave the console with **Ctrl+P, Ctrl+Q**; Ctrl+C
+would stop the bridge. Alternatively publish `{"name":"verify_code","args":{"code":"123456"}}` to `eufynet/command`.
+The session is then saved in `data/` and later starts need no code.
+
+**7. Check.** A healthy start looks like this:
+
+```
+Connected to the MQTT broker 127.0.0.1:1883, topics under eufynet/
+Logged in to the Eufy cloud
+P2P connected to T8010… at 192.168.1.x:…
+Front Door battery 54% (station)
+T8010… ready: guard mode Schedule, encryption Level1. Type help for commands
+Event CameraImage Front Door: picture … (26 KB, taken …)
+```
+
+The warning `Cannot use cloud cipher …, Using Level 1` is expected; eufy-security-client does the same. In Home
+Assistant, the HomeBase and each camera appear under Settings → Devices & services → MQTT.
+
+### Updating
+
+Pull the repository, repeat steps 1 and 2 (this keeps `data/`), then `docker compose up -d --build eufynet`.
+
+## Guard modes
+
+The HomeBase 2 knows Away, Home, Schedule, Custom 1–3, Geofencing and Disarmed. List the ones you want in Home Assistant
+with your own names:
+
+```yaml
+      - Mqtt__GuardModes__Custom1=Night
+```
+
+Without any `Mqtt__GuardModes__*` entries, all modes are offered under their standard names. To find which custom mode
+is which, switch modes in the Eufy app and watch `guard_mode_code` on `eufynet/<station serial>/state`, or type `status`
+in the console. A mode the station reports that is not in your list still shows, under its standard name.
+
+Choosing a mode in Home Assistant, Node-RED or the console **really arms or disarms the HomeBase**.
+
+## Console
+
+`docker attach eufynet`, then (Ctrl+P, Ctrl+Q to leave):
+
+| Command | |
+| --- | --- |
+| `status` | connection, guard mode, and per camera last motion/recording, counters and battery |
+| `picture [camera]` | download the newest preview picture now |
+| `mode <name> [station]` | set the guard mode (away, home, schedule, custom1 …) |
+| `info [station]` | the HomeBase's raw camera info (read-only) |
+| `clips [camera]` | the HomeBase's raw recording info (read-only) |
+| `help`, `quit` | `quit` stops the bridge |
+
+## MQTT topics
+
+`eufynet` is the default prefix (`Mqtt__BaseTopic`). Payloads are JSON unless noted.
 
 | Topic | Retained | |
 | --- | --- | --- |
-| `eufynet/status` | yes | `online` / `offline` (last will) |
-| `eufynet/login` | yes | login state; `needs_code: true` = send `verify_code` |
-| `eufynet/<station>/state` | yes | `guard_mode` (label), `guard_mode_code`, `alarm_mode`, `connected` … |
-| `eufynet/<camera>/state` | yes | `last_motion`, `last_recording`, `motions`, `recordings`, `battery`, `picture_taken` … |
-| `eufynet/<camera>/image` | yes | JPEG bytes |
+| `eufynet/status` | yes | `online` / `offline` |
+| `eufynet/login` | yes | login state; `needs_code: true` means a code is awaited |
+| `eufynet/<station>/state` | yes | `guard_mode` (your label), `guard_mode_code`, `alarm_mode`, `connected` |
+| `eufynet/<camera>/state` | yes | `last_motion`, `last_recording`, `motions`, `recordings`, `battery`, `picture_taken` |
+| `eufynet/<camera>/image` | yes | the last picture, JPEG bytes |
 | `eufynet/<camera>/motion` | no | `ON` per motion |
-| `eufynet/<camera>/event`, `eufynet/<station>/event` | no | for Node-RED: `{"type":"motion"\|"recording"\|"picture"\|"siren"\|"light"\|"storage"\|"alarm_mode"\|"guard_mode"\|"alarm"…, "device", "name", "time", …}` |
+| `eufynet/<camera>/event`, `eufynet/<station>/event` | no | `{"type": …, "device", "name", "time", …}`; types `motion`, `recording`, `picture`, `siren`, `alarm`, `alarm_mode`, `guard_mode`, `light`, `storage` … |
 | `eufynet/<station>/guard_mode/set` | in | a label (`Night`) or mode name (`Custom1`) |
-| `eufynet/command` | in | `{"id":"1","name":"picture","station":null,"args":{"camera":"Front Door"}}`; the same commands as the console (`status`, `info`, `clips`, `picture`, `set_guard_mode`, `verify_code` …) |
-| `eufynet/result` | no | `{"id","name","success","message","data"}` |
+| `eufynet/command` | in | `{"id":"1","name":"picture","args":{"camera":"Front Door"}}`; names as in the console: `status`, `picture`, `set_guard_mode` (arg `mode`), `info`, `clips`, `verify_code` (arg `code`) |
+| `eufynet/result` | no | `{"id","name","success","message","data"}` for each command |
 
-**Pictures.** After a recording whose crop picture is fresh, and at connect when the station has a crop newer than the last one downloaded, the bridge downloads it over P2P (`CMD_DATABASE_IMAGE`, read-only). It is published to the image topic and saved as `data/<camera>.jpg`. The station does not make a crop for every recording, so the picture can be older than the last recording; *Picture taken* says when it is from. `picture [camera]` in the console fetches the newest crop on demand.
+## Configuration
 
-What HB2 3.4.2.6h sends (checked live on 2 Nov): JSON `{"file","content"}` with URL-safe base64 (`-`/`_`), holding `v2_eufysecurity:<station>:<code>:` and a 640×360 JPEG whose head (quantization tables, frame size, all Huffman tables) is scrambled. The scan from SOS on is plain and uses the standard Huffman tables. `EufyImageV2` rebuilds the head from a standard template and finds the size by Huffman-decoding the scan and counting 8×8 blocks (920 MCUs of 16×16 = 640×360). The real quantization tables are lost, so the tones come out a little flat (Node's decoder has the same limit). The older `eufysecurity:` format (first 256 bytes AES-encrypted with a key from serial + DID) is handled too.
+Set these as environment variables in the compose file (`__` separates levels). Defaults are in
+[appsettings.json](src/EufyNet.App/appsettings.json).
 
-**Battery.** Read at connect and every hour from the station's `CMD_CAMERA_INFO` (parameter 1101 per channel; HB2 sends it), otherwise from the cloud device list (`params` 1101 with its update time). The newer value wins. On 2 Nov the station said Backyard 40% while the cloud still had 79% from January, so the local value matters.
+| Variable | Default | |
+| --- | --- | --- |
+| `Eufy__Username`, `Eufy__Password` | – | Eufy account |
+| `Eufy__Country` | `US` | account country, two letters |
+| `Eufy__StationIpAddresses__<serial>` | – | HomeBase LAN IP; without it the HomeBase is searched by broadcast |
+| `Eufy__ActivityWindow` | `08:00:00` | span of the motion/recording counters |
+| `Eufy__BatteryInterval` | `01:00:00` | how often batteries are read |
+| `Eufy__DownloadPictures` | `true` | fetch preview pictures |
+| `Eufy__LocalMotion__MotionCooldown` | `00:00:30` | PIR triggers closer than this are one motion |
+| `Mqtt__Host`, `Mqtt__Port` | –, `1883` | broker; without a host MQTT is off |
+| `Mqtt__Username`, `Mqtt__Password` | – | broker login |
+| `Mqtt__BaseTopic` | `eufynet` | topic prefix |
+| `Mqtt__DiscoveryPrefix` | `homeassistant` | empty turns discovery off |
+| `Mqtt__GuardModes__<mode>` | all modes | select options and labels |
+| `Mqtt__MotionOffDelay` | `00:00:30` | when the motion sensor turns off |
+| `Logging__Console__FormatterName` | `simple` | `json` for one JSON object per log line |
+
+`data/` holds the cloud session (a login token: keep it private), the counters (`activity.json`, so a restart does
+not reset them) and the last picture per camera.
+
+## Limitations
+
+- Motion has no person/vehicle/pet distinction: the HomeBase 2 does not report it locally.
+- The HomeBase does not make a preview picture for every recording, so the picture can be older than the last
+  recording; **Picture taken** says when it is from. Pictures come out a little flat in tone, because the station
+  scrambles the JPEG's quantization tables and standard ones are used instead.
+- No live video or clip download yet.
+
+## Development
+
+```bash
+dotnet user-secrets set "Eufy:Username" "you@example.com" --project src/EufyNet.App
+dotnet user-secrets set "Eufy:Password" "your-password" --project src/EufyNet.App
+dotnet user-secrets set "Eufy:Country" "DE" --project src/EufyNet.App
+dotnet run --project src/EufyNet.App
+```
+
+```bash
+dotnet test
+```
+
+Code layout and protocol notes: [docs/protocol-notes.md](docs/protocol-notes.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE). The protocol logic is ported from
+[eufy-security-client](https://github.com/bropat/eufy-security-client) (MIT, © bropat); see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Not affiliated with Eufy or Anker.
