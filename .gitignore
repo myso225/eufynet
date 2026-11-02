@@ -3,4 +3,3 @@ obj/
 data/
 *.user
 .vs/
-docker/app/

@@ -13,7 +13,9 @@ eufyCam 2 Pro), and where it is in the code. The user guide is the [README](../R
 | `src/EufyNet.Transport.Console` | Transport: events and state as log lines, commands and login answers from stdin |
 | `src/EufyNet.Transport.Mqtt` | Transport: MQTT with Home Assistant discovery, events for Node-RED, commands in |
 | `src/EufyNet.App` | Generic Host wiring |
-| `docker/` | Dockerfile and compose service |
+| `Dockerfile` | Multi-stage build from source (arm64 and amd64) |
+| `docker/` | Compose service example |
+| `.github/workflows/docker.yml` | Tests, then builds and pushes the image to ghcr.io |
 | `tests/EufyNet.Tests` | Crypto checked against Node-generated vectors; login flow against a fake Eufy server; P2P against a fake station; MQTT against an in-process broker |
 
 `nuget.config` limits restore to nuget.org, so machine-wide private feeds are not needed.

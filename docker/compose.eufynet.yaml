@@ -1,8 +1,8 @@
-# Service to add under "services:" in your compose.yaml, next to a folder "eufynet" holding this folder's contents
-# (Dockerfile, app/) and a data/ folder. Replace the <…> values.
+# Service to add under "services:" in your compose.yaml. It keeps its data in ./eufynet/data next to the compose file.
+# Replace the <…> values.
   eufynet:
-    build: ./eufynet
-    image: eufynet:local
+    # Prebuilt for arm64 (Raspberry Pi) and amd64. To build it yourself instead: "build: <path to the cloned repo>".
+    image: ghcr.io/myso225/eufynet:latest
     container_name: eufynet
     # The P2P lookup is UDP to the HomeBase on the LAN.
     network_mode: host

@@ -55,7 +55,6 @@ Protocol details and what was observed on real hardware: [docs/protocol-notes.md
 - A **Raspberry Pi** (or any arm64/x64 Linux box) with **Docker** and the compose plugin, on the same LAN as the HomeBase.
 - An **MQTT broker**, e.g. the Mosquitto add-on/container you use for Home Assistant, with the MQTT integration set up
   in Home Assistant.
-- The **.NET 10 SDK** on the machine where you build (a PC, or the Pi itself). See step 1 below.
 - Your Eufy account's email, password and country. Consider a separate Eufy account that you invite to the HomeBase as
   an admin from the Eufy app: the bridge stays logged in, and some clients log each other out when they share one account.
 
@@ -63,42 +62,23 @@ Protocol details and what was observed on real hardware: [docs/protocol-notes.md
 
 The steps assume your compose file is `~/DockerCompose/compose.yaml`; adjust the paths to yours.
 
-**1. Build the app** for arm64 in the repository folder (on a PC with the .NET 10 SDK):
+**1. Create the data folder** next to your compose file. The image is ready-made on GitHub Container Registry
+(`ghcr.io/myso225/eufynet`, arm64 and amd64), built from this repository by GitHub Actions, so there is nothing to build.
 
 ```bash
-dotnet publish src/EufyNet.App -c Release -r linux-arm64 --self-contained false -o docker/app
+mkdir -p ~/DockerCompose/eufynet/data
 ```
 
-No SDK on your PC? Clone the repository on the Pi and run the same command inside the SDK container (not tested yet;
-then skip step 2's `scp` and copy `docker/*` locally):
-
-```bash
-docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet publish src/EufyNet.App -c Release -r linux-arm64 --self-contained false -o docker/app
-```
-
-`docker/` now holds everything the image needs: a `Dockerfile` that copies `app/` onto the .NET runtime image.
-
-**2. Copy it to the Pi**, into an `eufynet` folder next to your compose file, with an empty `data` folder:
-
-```bash
-scp -r docker/* <user>@<pi>:~/DockerCompose/eufynet/
-```
-
-```bash
-ssh <user>@<pi> "mkdir -p ~/DockerCompose/eufynet/data"
-```
-
-**3. Find your HomeBase's serial and LAN IP.** The serial starts with `T8010`; it is in the Eufy app's HomeBase settings,
+**2. Find your HomeBase's serial and LAN IP.** The serial starts with `T8010`; it is in the Eufy app's HomeBase settings,
 and the bridge logs it at start (`Station T8010… : model T8010 …`), so you can also start without the IP line and add it
 afterwards. The LAN IP is in your router's client list; give it a fixed DHCP lease.
 
-**4. Add the service** from [docker/compose.eufynet.yaml](docker/compose.eufynet.yaml) under `services:` in your
+**3. Add the service** from [docker/compose.eufynet.yaml](docker/compose.eufynet.yaml) under `services:` in your
 compose file and fill in the `<…>` values:
 
 ```yaml
   eufynet:
-    build: ./eufynet
-    image: eufynet:local
+    image: ghcr.io/myso225/eufynet:latest
     container_name: eufynet
     network_mode: host
     restart: unless-stopped
@@ -131,15 +111,15 @@ compose file and fill in the `<…>` values:
 - Prefer to keep passwords out of `compose.yaml`? Put `EUFY_PASSWORD=…` in the `.env` file next to it and write
   `- Eufy__Password=${EUFY_PASSWORD}`.
 
-**5. Start it** and watch the log:
+**4. Start it** and watch the log:
 
 ```bash
-cd ~/DockerCompose && docker compose up -d --build eufynet && docker logs -f eufynet
+cd ~/DockerCompose && docker compose up -d eufynet && docker logs -f eufynet
 ```
 
 Ctrl+C leaves the log; the container keeps running.
 
-**6. First login.** On the very first start Eufy emails you a verification code and the log says so. Enter it in the
+**5. First login.** On the very first start Eufy emails you a verification code and the log says so. Enter it in the
 container's console:
 
 ```bash
@@ -150,7 +130,7 @@ Type the code and press Enter (an empty line asks for a new code). Leave the con
 would stop the bridge. Alternatively publish `{"name":"verify_code","args":{"code":"123456"}}` to `eufynet/command`.
 The session is then saved in `data/` and later starts need no code.
 
-**7. Check.** A healthy start looks like this:
+**6. Check.** A healthy start looks like this:
 
 ```
 Connected to the MQTT broker 127.0.0.1:1883, topics under eufynet/
@@ -166,7 +146,17 @@ Assistant, the HomeBase and each camera appear under Settings → Devices & serv
 
 ### Updating
 
-Pull the repository, repeat steps 1 and 2 (this keeps `data/`), then `docker compose up -d --build eufynet`.
+```bash
+cd ~/DockerCompose && docker compose pull eufynet && docker compose up -d eufynet
+```
+
+`latest` follows the main branch. To stay on a release instead, use a version tag such as `ghcr.io/myso225/eufynet:1.0`.
+
+### Building the image yourself
+
+Clone the repository (on the Pi or anywhere with Docker) and replace the `image:` line with `build: <path to the clone>`,
+then `docker compose up -d --build eufynet`. The `Dockerfile` builds from source inside Docker, so no .NET SDK is needed.
+For another platform: `docker buildx build --platform linux/arm64 -t eufynet .`
 
 ## Guard modes
 
